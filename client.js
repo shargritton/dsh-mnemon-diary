@@ -128,9 +128,16 @@ window.__ModuleLoader__.load({
         if (!callAny) { setReviewErr('当前页面拿不到定时任务服务，请刷新后重试'); return }
         try {
           const snap = await callAny('/dsh-automation', 'snapshot', { sessionId: 'settings' })
-          const def = findReview(snap)
+          let def = findReview(snap)
+          if (!def) {
+            // 打开设置页就顺手把体检任务备好，新手不用自己建
+            try {
+              const e = await ensureReview()
+              def = e.def
+            } catch (e) { setReviewErr('自动创建体检任务失败：' + String(e && e.message || e)) }
+          }
           setReviewInfo(def || null)
-          setReviewErr(def ? '' : '还没建「记忆月度体检（mnemon）」；点「立即体检」会自动帮你建好')
+          if (def) setReviewErr('')
         } catch (e) { setReviewErr(String(e && e.message || e)) }
       }
       useEffect(() => { loadReview() }, [])

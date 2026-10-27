@@ -2,6 +2,16 @@
 
 为 [DSH](https://github.com/deepseek-ai) 的 `dsh-mnemon` 增加「每日日记 + 重要记忆筛选 + 草稿审阅」的伴生插件。
 
+## 三步上手（第一次用）
+
+1. **装**：依赖里加 `"dsh-mnemon-diary": "github:shargritton/dsh-mnemon-diary"`，`dsh.profile.bundles` 里加 `dsh-mnemon-diary`，`pnpm install`，重启 DSH
+2. **生成**：设置 → 插件设置 →「每日日记」→ 展开 → 点「立即生成」（一次同时生成日记和「我是谁」）
+3. **入库**：草稿列表里点「上传记忆」；想让它每天自己跑，把「固定生成时间」设好、开「日记草稿自动上传记忆」
+
+> 装完什么都不改也能用：默认每天生成一次、日记进文档库、快照只在上下文快满时生成。
+> 插件启动会自动备好「体检 skill」，首次打开设置页会自动建好月度体检任务。
+
+
 - 不改动 `dsh-mnemon` 源码，通过它的 **文档库磁盘契约**（`~/.mnemon/documents`）写入
 - 选材、提炼、草稿、审阅、归档、日记本等逻辑与原 `dsh-prime-diary` 保持一致
 - 与原版唯一区别：**落库目标从 prime 的 `l1_records` 换成了 mnemon 的 Documents**
