@@ -1,6 +1,6 @@
 {
   "name": "dsh-mnemon-diary",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "为 dsh-mnemon 增加每日日记、重要记忆筛选与草稿审阅的伴生插件",
   "type": "module",
   "main": "index.js",
@@ -12,6 +12,7 @@
   "files": [
     "index.js",
     "client.js",
+    "plan-template.md",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"

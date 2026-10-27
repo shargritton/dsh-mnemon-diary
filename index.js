@@ -43,6 +43,11 @@ const DEFAULTS = {
   diaryBookEnabled: true,
   diaryBookDir: '',
   whoAmIDir: '',
+  whoamiKeep: 3,
+  snapshotKeep: 20,
+  diaryMergeDays: 30,
+  diaryArchiveMonths: 12,
+  capacityLimitMb: 8,
   ownerName: '',
   personaFile: '',
   autoWhoamiCollection: true,
@@ -129,6 +134,11 @@ function saveConfig(patch) {
   next.maxChars = Math.max(next.minChars, Number(next.maxChars) || 500)
   next.whoamiMinChars = Math.max(1, Number(next.whoamiMinChars) || 50)
   next.whoamiMaxChars = Math.max(next.whoamiMinChars + 10, Number(next.whoamiMaxChars) || 500)
+  next.whoamiKeep = Math.min(5, Math.max(2, Number(next.whoamiKeep) || 3))
+  next.snapshotKeep = Math.min(200, Math.max(5, Math.round(Number(next.snapshotKeep) || 20)))
+  next.diaryMergeDays = Math.min(365, Math.max(7, Math.round(Number(next.diaryMergeDays) || 30)))
+  next.diaryArchiveMonths = Math.min(60, Math.max(1, Math.round(Number(next.diaryArchiveMonths) || 12)))
+  next.capacityLimitMb = Math.min(40, Math.max(2, Number(next.capacityLimitMb) || 8))
   const legacy = next.importanceThreshold
   if (legacy != null) {
     if (next.importanceThresholdProject == null) next.importanceThresholdProject = legacy
@@ -303,63 +313,268 @@ function renderDocument(record, content) {
   ].join('\n')
 }
 
+function documentBodyOf(raw) {
+  const s = String(raw || '')
+  if (!s.startsWith('---')) return s.trim()
+  const end = s.indexOf('\n---\n', 3)
+  if (end < 0) return s.trim()
+  return s.slice(end + 5).trim()
+}
+
+// 「我是谁」只允许一份：同名文档有多个时，保留 active 优先、其次最新的那份，
+// 其余先备份到 backups/doc-duplicates/ 再从索引与磁盘移除；keeper 若被归档则拉回 active。
+function keepSingleDocument(p, index, title) {
+  const matches = index.documents.filter(d => d.title === title)
+  if (matches.length <= 1 && !matches.some(d => d.status !== 'active')) return { removed: 0, restored: false }
+  const keeper = matches.slice().sort((a, b) => (b.status === 'active') - (a.status === 'active') || Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0))[0]
+  if (!keeper) return { removed: 0, restored: false }
+  const now = new Date().toISOString()
+  const backupDir = path.join(DATA(), 'backups', 'doc-duplicates')
+  ensure(backupDir)
+  const drop = []
+  let removed = 0
+  for (const d of matches) {
+    if (d.id === keeper.id) continue
+    const src = path.join(p[d.status], d.filename)
+    try {
+      if (fs.existsSync(src)) {
+        fs.copyFileSync(src, path.join(backupDir, `${now.slice(0, 10)}-${d.filename}`))
+        fs.rmSync(src, { force: true })
+      }
+      drop.push(d.id)
+      removed += 1
+    } catch (e) {
+      dbg(`去重「${title}」失败（保留旧副本）：${d.filename} ${e && e.message}`)
+    }
+  }
+  if (drop.length) index.documents = index.documents.filter(d => !drop.includes(d.id))
+  let restored = false
+  if (keeper.status !== 'active') {
+    const archivedPath = path.join(p.archived, keeper.filename)
+    try {
+      const body = documentBodyOf(fs.readFileSync(archivedPath, 'utf8'))
+      const recovered = { ...keeper, status: 'active', relativePath: `documents/active/${keeper.filename}`, updatedAt: now, lastAccessedAt: now, revision: keeper.revision + 1 }
+      const rendered = renderDocument(recovered, body)
+      recovered.sizeBytes = Buffer.byteLength(rendered)
+      docAtomicWrite(path.join(p.active, keeper.filename), rendered)
+      fs.rmSync(archivedPath, { force: true })
+      index.documents = index.documents.map(d => (d.id === keeper.id ? recovered : d))
+      restored = true
+    } catch (e) {
+      dbg(`恢复归档的「${title}」失败：${e && e.message}`)
+    }
+  }
+  return { removed, restored }
+}
+
+function upsertUnlocked(p, index, opts) {
+  const title = String(opts.title || '').trim().slice(0, 160)
+  const description = String(opts.description || '').replace(/\s+/g, ' ').trim().slice(0, 600)
+  const content = String(opts.content || '').replace(/\0/g, '').trim()
+  const digest = opts.digest || sha256(content)
+  const now = opts.now || new Date().toISOString()
+  const sessionIds = [...new Set((opts.sessionIds || []).map(String).filter(Boolean))].slice(0, 20)
+  const sourcePaths = (opts.sourcePaths || []).map(String).filter(Boolean)
+  const hit = index.documents.find(d => d.title === title && d.status === 'active')
+  if (hit && hit.contentHash === digest) return { record: hit, unchanged: true, created: false, updated: false }
+  let record
+  if (hit) {
+    record = {
+      ...hit,
+      description: description || hit.description,
+      sessionIds: hit.sessionIds.length ? hit.sessionIds : sessionIds,
+      sourcePaths: hit.sourcePaths.length ? hit.sourcePaths : sourcePaths,
+      updatedAt: now,
+      lastAccessedAt: now,
+      revision: hit.revision + 1,
+      contentHash: digest,
+    }
+  } else {
+    const id = crypto.randomUUID()
+    record = {
+      id,
+      title,
+      description,
+      status: 'active',
+      filename: `${docSlug(title)}-${id.slice(0, 8)}.md`,
+      relativePath: '',
+      sourcePaths,
+      sessionIds,
+      createdAt: now,
+      updatedAt: now,
+      lastAccessedAt: now,
+      revision: 1,
+      contentHash: digest,
+      sizeBytes: 0,
+      memoryBodyIds: [],
+    }
+  }
+  const rendered = renderDocument(record, content)
+  record.sizeBytes = Buffer.byteLength(rendered)
+  record.relativePath = `documents/${record.status}/${record.filename}`
+  docAtomicWrite(path.join(p[record.status], record.filename), rendered)
+  index.documents = hit ? index.documents.map(d => (d.id === record.id ? record : d)) : [...index.documents, record]
+  return { record, unchanged: false, created: !hit, updated: !!hit }
+}
+
+function persistIndex(p, index) {
+  docAtomicWrite(p.index, `${JSON.stringify({ version: 1, documents: index.documents }, null, 2)}\n`)
+}
+
 function writeDocument(opts) {
   const title = String(opts.title || '').trim().slice(0, 160)
   if (!title) throw new Error('document title is required')
-  const description = String(opts.description || '').replace(/\s+/g, ' ').trim().slice(0, 600)
   const content = String(opts.content || '').replace(/\0/g, '').trim()
   if (!content) throw new Error('document content is required')
   if (Buffer.byteLength(content) > DOC_ACTIVE_LIMIT_BYTES) throw new Error('document content is too large')
-  const sessionIds = [...new Set((opts.sessionIds || []).map(String).filter(Boolean))].slice(0, 20)
-  const sourcePaths = (opts.sourcePaths || []).map(String).filter(Boolean)
   const root = opts.root || documentsRoot()
   const digest = sha256(content)
   return docWithLock(root, (p) => {
     const index = docReadIndex(p)
-    const now = new Date().toISOString()
-    const hit = index.documents.find(d => d.title === title && d.status === 'active')
-    if (hit && hit.contentHash === digest) {
-      return { created: false, updated: false, id: hit.id, total: index.documents.length }
+    const dedupe = opts.single ? keepSingleDocument(p, index, title) : null
+    const deduped = !!(dedupe && (dedupe.removed || dedupe.restored))
+    const res = upsertUnlocked(p, index, {
+      title,
+      description: opts.description,
+      content,
+      digest,
+      sessionIds: opts.sessionIds,
+      sourcePaths: opts.sourcePaths,
+    })
+    // 内容没变但去重/恢复动过索引，也得落盘
+    if (!res.unchanged || deduped) persistIndex(p, index)
+    return { created: res.created, updated: res.updated, id: res.record.id, total: index.documents.length, deduped: dedupe ? dedupe.removed : 0 }
+  })
+}
+
+const DIARY_DAY_RE = /^日记 (\d{4}-\d{2}-\d{2})$/
+const DIARY_MONTH_RE = /^日记合辑 (\d{4}-\d{2})$/
+const SNAPSHOT_TITLE_RE = /^(快照|聊天|综合) · /
+
+// 把一份 active 文档转成 archived（正文原样带走，revision+1）
+function archiveRecordUnlocked(p, index, rec, now) {
+  if (rec.status !== 'active') return null
+  const src = path.join(p.active, rec.filename)
+  try {
+    const raw = fs.readFileSync(src, 'utf8')
+    const body = documentBodyOf(raw)
+    const next = {
+      ...rec,
+      status: 'archived',
+      relativePath: `documents/archived/${rec.filename}`,
+      updatedAt: now,
+      lastAccessedAt: now,
+      revision: rec.revision + 1,
     }
-    let record
-    if (hit) {
-      record = {
-        ...hit,
-        description: description || hit.description,
-        sessionIds: hit.sessionIds.length ? hit.sessionIds : sessionIds,
-        sourcePaths: hit.sourcePaths.length ? hit.sourcePaths : sourcePaths,
-        updatedAt: now,
-        lastAccessedAt: now,
-        revision: hit.revision + 1,
-        contentHash: digest,
-      }
-    } else {
-      const id = crypto.randomUUID()
-      record = {
-        id,
-        title,
-        description,
-        status: 'active',
-        filename: `${docSlug(title)}-${id.slice(0, 8)}.md`,
-        relativePath: '',
-        sourcePaths,
-        sessionIds,
-        createdAt: now,
-        updatedAt: now,
-        lastAccessedAt: now,
-        revision: 1,
-        contentHash: digest,
-        sizeBytes: 0,
-        memoryBodyIds: [],
-      }
+    const rendered = renderDocument(next, body)
+    next.sizeBytes = Buffer.byteLength(rendered)
+    docAtomicWrite(path.join(p.archived, rec.filename), rendered)
+    fs.rmSync(src, { force: true })
+    index.documents = index.documents.map(d => (d.id === rec.id ? next : d))
+    return next
+  } catch (e) {
+    dbg(`归档文档失败：${rec.filename} ${e && e.message}`)
+    return null
+  }
+}
+
+// 文档库维护：日记合并/长期归档、快照滚动窗口、容量守卫
+function maintainDocuments(opts = {}) {
+  const cfg = opts.cfg || loadConfig()
+  const root = opts.root || documentsRoot()
+  return docWithLock(root, (p) => {
+    const index = docReadIndex(p)
+    const now = new Date()
+    const nowIso = now.toISOString()
+    const out = { mergedMonths: 0, mergedDays: 0, archived: 0, archivedDiary: 0, snapshotArchived: 0, guarded: 0, activeBytes: 0, docs: 0 }
+
+    // 1) 单日日记超过 N 天 → 合并进月合辑，原单日文档归档
+    const mergeDays = Math.max(7, Math.min(365, Number(cfg.diaryMergeDays) || 30))
+    const cutoff = now.getTime() - mergeDays * 86400000
+    const oldDays = index.documents.filter(d => d.status === 'active' && DIARY_DAY_RE.test(d.title) && Date.parse(`${d.title.slice(3)}T00:00:00`) < cutoff)
+    const byMonth = new Map()
+    for (const d of oldDays) {
+      const month = d.title.slice(3, 10)
+      if (!byMonth.has(month)) byMonth.set(month, [])
+      byMonth.get(month).push(d)
     }
-    const rendered = renderDocument(record, content)
-    record.sizeBytes = Buffer.byteLength(rendered)
-    record.relativePath = `documents/${record.status}/${record.filename}`
-    docAtomicWrite(path.join(p[record.status], record.filename), rendered)
-    const documents = hit ? index.documents.map(d => (d.id === record.id ? record : d)) : [...index.documents, record]
-    docAtomicWrite(p.index, `${JSON.stringify({ version: 1, documents }, null, 2)}\n`)
-    return { created: !hit, updated: !!hit, id: record.id, total: documents.length }
+    for (const [month, days] of [...byMonth.entries()].sort()) {
+      const title = `日记合辑 ${month}`
+      const existing = index.documents.find(d => d.status === 'active' && d.title === title)
+      const sections = new Map()
+      if (existing) {
+        try {
+          const body = documentBodyOf(fs.readFileSync(path.join(p.active, existing.filename), 'utf8'))
+          for (const part of body.split(/\n(?=## \d{4}-\d{2}-\d{2})/)) {
+            const m = /^## (\d{4}-\d{2}-\d{2})/.exec(part.trim())
+            if (m) sections.set(m[1], part.replace(/^## \d{4}-\d{2}-\d{2}\s*\n?/, '').trim())
+          }
+        } catch (e) {
+          dbg(`读旧合辑失败：${existing.filename} ${e && e.message}`)
+        }
+      }
+      for (const d of days.slice().sort((a, b) => a.title.localeCompare(b.title))) {
+        let body = ''
+        try {
+          body = documentBodyOf(fs.readFileSync(path.join(p.active, d.filename), 'utf8'))
+        } catch (e) {
+          dbg(`读日记失败：${d.filename} ${e && e.message}`)
+        }
+        sections.set(d.title.slice(3), body)
+      }
+      if (!sections.size) continue
+      const dates = [...sections.keys()].sort()
+      const content = `# ${title}\n\n> 共 ${dates.length} 天 · 更新于 ${nowIso.slice(0, 10)}\n\n` + dates.map(k => `## ${k}\n\n${sections.get(k)}\n`).join('\n')
+      const res = upsertUnlocked(p, index, { title, description: `日记合辑 · ${dates.length} 天 · ${month}`, content, now: nowIso })
+      if (res.created) out.mergedMonths += 1
+      out.mergedDays += days.length
+      for (const d of days) if (archiveRecordUnlocked(p, index, d, nowIso)) out.archived += 1
+    }
+
+    // 2) 月合辑超过 N 个月 → 归档
+    const months = Math.max(1, Math.min(60, Number(cfg.diaryArchiveMonths) || 12))
+    const cut = new Date(now)
+    cut.setMonth(cut.getMonth() - months)
+    const cutoffYm = `${cut.getFullYear()}-${String(cut.getMonth() + 1).padStart(2, '0')}`
+    for (const d of index.documents.filter(x => x.status === 'active' && DIARY_MONTH_RE.test(x.title))) {
+      if (d.title.slice(-7) < cutoffYm && archiveRecordUnlocked(p, index, d, nowIso)) out.archivedDiary += 1
+    }
+
+    // 3) 快照滚动窗口：按更新时间倒序只留最近 N 份，其余归档
+    const keep = Math.max(5, Math.min(200, Number(cfg.snapshotKeep) || 20))
+    const snaps = index.documents
+      .filter(d => d.status === 'active' && SNAPSHOT_TITLE_RE.test(d.title))
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    for (const d of snaps.slice(keep)) {
+      if (archiveRecordUnlocked(p, index, d, nowIso)) out.snapshotArchived += 1
+    }
+
+    // 4) 容量守卫：active 总量超上限时，从最旧的开始归档（「我是谁」永不动）
+    const limitBytes = Math.max(2, Math.min(40, Number(cfg.capacityLimitMb) || 8)) * 1024 * 1024
+    const activeBytes = () => index.documents.filter(d => d.status === 'active').reduce((sum, d) => sum + (d.sizeBytes || 0), 0)
+    let total = activeBytes()
+    if (total > limitBytes) {
+      // 优先丢快照，其次普通文档，月合辑最后；「我是谁」永不动
+      const rank = (d) => (SNAPSHOT_TITLE_RE.test(d.title) ? 0 : DIARY_MONTH_RE.test(d.title) ? 2 : 1)
+      const victims = index.documents
+        .filter(d => d.status === 'active' && d.title !== '我是谁')
+        .sort((a, b) => rank(a) - rank(b) || Date.parse(a.updatedAt) - Date.parse(b.updatedAt))
+      for (const d of victims) {
+        if (total <= limitBytes * 0.9) break
+        const size = d.sizeBytes || 0
+        if (archiveRecordUnlocked(p, index, d, nowIso)) {
+          out.guarded += 1
+          total -= size
+        }
+      }
+      total = activeBytes()
+    }
+
+    out.activeBytes = total
+    out.docs = index.documents.length
+    const changed = out.mergedDays > 0 || out.archived > 0 || out.archivedDiary > 0 || out.snapshotArchived > 0 || out.guarded > 0
+    if (changed) persistIndex(p, index)
+    return out
   })
 }
 
@@ -428,6 +643,17 @@ function renderMemoryBody(tag, sceneRoot, items) {
  * 把一批「日记/记忆候选」写进 mnemon 文档库：同一天只维护一份文档，按标题幂等。
  * 返回形状与原 writePrime 对齐，调用方（adopt / digestRefine）无需改动语义。
  */
+function runMaintenance(cfg = null) {
+  try {
+    const m = maintainDocuments({ cfg: cfg || loadConfig() })
+    if (m.mergedDays || m.archived || m.archivedDiary || m.snapshotArchived || m.guarded) dbg(`文档维护：${JSON.stringify(m)}`)
+    return m
+  } catch (e) {
+    dbg(`文档维护失败：${e && e.message}`)
+    return null
+  }
+}
+
 function writeMnemon(tag, memories, opts = {}) {
   const sceneRoot = opts.sceneRoot || '日记'
   const root = opts.root || documentsRoot()
@@ -443,6 +669,7 @@ function writeMnemon(tag, memories, opts = {}) {
     .join(' — ')
   const res = writeDocument({ title, description, content, sessionIds: opts.sessionIds || [], sourcePaths: opts.sourcePaths || [], root })
   const written = res.created ? planned : 0
+  runMaintenance()
   return {
     written,
     planned,
@@ -637,9 +864,17 @@ function listWhoami() {
   }).filter(Boolean)
 }
 
+function whoamiKeepCount(cfg = null) {
+  const c = cfg || loadConfig()
+  return Math.min(5, Math.max(2, Number(c.whoamiKeep) || 3))
+}
+
 function rebuildWhoamiCollection() {
-  const items = listWhoami()
-  const lines = ['# 我是谁 · 记忆合集', '', `> 共 ${items.length} 篇 · 更新于 ${new Date().toLocaleString('zh-CN', { hour12: false })}`, '']
+  const all = listWhoami()
+  const keep = whoamiKeepCount()
+  const items = all.slice(0, keep)
+  const older = Math.max(0, all.length - items.length)
+  const lines = ['# 我是谁 · 记忆合集', '', `> 只保留最近 ${items.length} 篇（上限 ${keep} 篇）${older ? `，更早的 ${older} 篇已不再收录` : ''} · 更新于 ${new Date().toLocaleString('zh-CN', { hour12: false })}`, '']
   for (const it of items) {
     const d = readJson(whoamiItemFile(it.date), null)
     if (!d || !String(d.text || '').trim()) continue
@@ -686,8 +921,9 @@ function uploadWhoami(date) {
   if (!d) throw new Error(`没有 ${date} 的「我是谁」记录`)
   const rebuilt = rebuildWhoamiCollection()
   const content = fs.readFileSync(rebuilt.file, 'utf8')
-  const r = writeDocument({ title: '我是谁', description: `我是谁记忆合集 · 共 ${rebuilt.entries} 篇 · 最近更新 ${date}`, content, sessionIds: [] })
+  const r = writeDocument({ title: '我是谁', description: `我是谁记忆合集 · 最近 ${rebuilt.entries} 篇 · 更新 ${date}`, content, sessionIds: [], single: true })
   writeJson(whoamiItemFile(date), { ...d, uploaded: true, uploadedAt: Date.now() })
+  runMaintenance()
   return { ok: true, date, entries: rebuilt.entries, created: !!r.created, updated: !!r.updated, documentId: r.id, total: r.total }
 }
 
@@ -696,6 +932,127 @@ function deleteWhoami(date) {
   if (fs.existsSync(file)) fs.rmSync(file, { force: true })
   rebuildWhoamiCollection()
   return { ok: true, whoami: listWhoami() }
+}
+
+const PLAN_FILE_NAME = '记忆存储方案.md'
+const PLAN_SKILL_START = '<!-- skill:start -->'
+const PLAN_SKILL_END = '<!-- skill:end -->'
+
+function planFile() {
+  return path.join(DATA(), PLAN_FILE_NAME)
+}
+
+function planTemplate() {
+  try {
+    return fs.readFileSync(new URL('./plan-template.md', import.meta.url), 'utf8')
+  } catch {
+    return '# 记忆存储方案\n\n（模板文件 plan-template.md 缺失，请重装插件）\n'
+  }
+}
+
+function ensurePlan() {
+  const f = planFile()
+  if (!fs.existsSync(f)) {
+    ensure(path.dirname(f))
+    fs.writeFileSync(f, planTemplate())
+    dbg(`已生成默认记忆存储方案：${f}`)
+  }
+  return f
+}
+
+function skillFile() {
+  return path.join(HOME(), 'skills', 'mnemon-memory-review', 'SKILL.md')
+}
+
+function extractSkillSection(text) {
+  const s = String(text || '')
+  const i = s.indexOf(PLAN_SKILL_START)
+  const j = s.indexOf(PLAN_SKILL_END)
+  if (i < 0 || j < 0 || j <= i) return ''
+  return s.slice(i + PLAN_SKILL_START.length, j).trim()
+}
+
+function skillStatus(planText = null) {
+  const f = skillFile()
+  const exists = fs.existsSync(f)
+  let synced = false
+  let mtime = null
+  if (exists) {
+    try {
+      const cur = fs.readFileSync(f, 'utf8').trim()
+      mtime = fs.statSync(f).mtime.toISOString()
+      let plan = planText
+      if (plan == null) plan = fs.existsSync(planFile()) ? fs.readFileSync(planFile(), 'utf8') : planTemplate()
+      const want = extractSkillSection(plan)
+      synced = !!want && want === cur
+    } catch {
+      synced = false
+    }
+  }
+  return { path: f, exists, synced, mtime }
+}
+
+function planGet() {
+  const f = ensurePlan()
+  const text = fs.readFileSync(f, 'utf8')
+  return { path: f, text, chars: [...text].length, skill: skillStatus(text) }
+}
+
+function backupPlanFile(tag) {
+  try {
+    const f = planFile()
+    if (!fs.existsSync(f)) return null
+    const dir = path.join(DATA(), 'backups')
+    ensure(dir)
+    const dst = path.join(dir, `plan-${tag}-${Date.now()}.md`)
+    fs.copyFileSync(f, dst)
+    return dst
+  } catch {
+    return null
+  }
+}
+
+function planSave(text) {
+  const t = String(text || '')
+  if (!t.trim()) throw new Error('方案内容不能为空')
+  if (Buffer.byteLength(t) > 512 * 1024) throw new Error('方案内容太大（上限 512 KB）')
+  const f = ensurePlan()
+  const backup = backupPlanFile('prev')
+  const tmp = `${f}.tmp`
+  fs.writeFileSync(tmp, t)
+  fs.renameSync(tmp, f)
+  return { ...planGet(), backup }
+}
+
+function planReset() {
+  const f = ensurePlan()
+  const backup = backupPlanFile('reset')
+  fs.writeFileSync(f, planTemplate())
+  return { ...planGet(), backup }
+}
+
+function planWriteSkill() {
+  ensurePlan()
+  const body = extractSkillSection(fs.readFileSync(planFile(), 'utf8'))
+  if (!body) throw new Error('方案里找不到 <!-- skill:start --> … <!-- skill:end --> 标记段')
+  const dst = skillFile()
+  ensure(path.dirname(dst))
+  let backup = null
+  if (fs.existsSync(dst)) {
+    const dir = path.join(DATA(), 'backups', 'skills')
+    ensure(dir)
+    backup = path.join(dir, `SKILL-${Date.now()}.md`)
+    fs.copyFileSync(dst, backup)
+  }
+  fs.writeFileSync(dst, `${body}\n`)
+  dbg(`已安装 skill：${dst}${backup ? `（旧版备份 ${backup}）` : ''}`)
+  return { ok: true, path: dst, chars: [...body].length, backup, skill: skillStatus() }
+}
+
+function planOpenDir() {
+  const f = ensurePlan()
+  execFileSync('open', [path.dirname(f)])
+  return { ok: true, dir: path.dirname(f), file: f }
 }
 
 function openWhoamiDir() {
@@ -1569,6 +1926,24 @@ async function handle(ctx, endpoint, payload) {
     case 'whoami.rewritePersona': return rewritePersona(ctx)
     case 'whoami.delete': return deleteWhoami(payload?.date)
     case 'whoami.openDir': return openWhoamiDir()
+    case 'docs.maintain': return runMaintenance()
+    case 'plan.get': return planGet()
+    case 'plan.save': return planSave(payload && payload.text)
+    case 'plan.reset': return planReset()
+    case 'plan.writeSkill': return planWriteSkill()
+    case 'plan.openDir': return planOpenDir()
+    case 'docs.stats': {
+      const p2 = docPaths(documentsRoot())
+      const idx = docReadIndex(p2)
+      const active = idx.documents.filter(d => d.status === 'active')
+      return {
+        docs: idx.documents.length,
+        active: active.length,
+        archived: idx.documents.length - active.length,
+        activeBytes: active.reduce((sum, d) => sum + (d.sizeBytes || 0), 0),
+        keep: { snapshotKeep: loadConfig().snapshotKeep, diaryMergeDays: loadConfig().diaryMergeDays, diaryArchiveMonths: loadConfig().diaryArchiveMonths, capacityLimitMb: loadConfig().capacityLimitMb },
+      }
+    }
     case 'digest.list': return digestList()
     case 'digest.delete': return deleteDigest(payload?.date, payload?.sessionId)
     case 'digest.get': {
@@ -1598,6 +1973,15 @@ export const inject = ['tools', 'llm', 'webServer']
 
 export function apply(ctx) {
   ensure(DATA())
+  // 首次启动顺手把「记忆体检」skill 装好（已存在则不动，绝不会覆盖用户的改法）
+  try {
+    if (!skillStatus().exists) {
+      const r = planWriteSkill()
+      dbg(`首启自动安装体检 skill：${r.path}`)
+    }
+  } catch (e) {
+    dbg(`自动安装体检 skill 失败（不影响插件）：${e && e.message}`)
+  }
   dbg('apply start')
   const state = loadState()
   if (!state.nextAt) {
@@ -1684,4 +2068,4 @@ export function apply(ctx) {
   }, `${PLUGIN}: scheduler`)
 }
 
-export const __test = { scanSessions, readSession, walkSessionFiles, nextSlotFrom, normalizeDailyAt, scheduleSignature, writeMnemon, writeDocument, documentsRoot, docPaths, renderDocument, diagWriteTest, adopt, listDrafts, loadConfig, writeWhoami, listWhoami, uploadWhoami, deleteWhoami, uploadPersona, rewritePersona, extractPersonaSection, dropPersonaSection, looksTruncatedPersona, cleanPersonaBody, splitPersonaDoc, stripPersonaBlock, summarizePersona, writePersonaBlock, resolvePersonaFile, rebuildWhoamiCollection, resolveWhoamiDir, whoamiCollectionFile, getWhoami }
+export const __test = { scanSessions, readSession, walkSessionFiles, nextSlotFrom, normalizeDailyAt, scheduleSignature, writeMnemon, writeDocument, documentsRoot, docPaths, renderDocument, diagWriteTest, adopt, listDrafts, loadConfig, writeWhoami, listWhoami, uploadWhoami, deleteWhoami, uploadPersona, rewritePersona, extractPersonaSection, dropPersonaSection, looksTruncatedPersona, cleanPersonaBody, splitPersonaDoc, stripPersonaBlock, summarizePersona, writePersonaBlock, resolvePersonaFile, rebuildWhoamiCollection, resolveWhoamiDir, whoamiCollectionFile, getWhoami, whoamiKeepCount, keepSingleDocument, documentBodyOf, planGet, planSave, planReset, planWriteSkill, planFile, planTemplate, skillFile, skillStatus, extractSkillSection, maintainDocuments, runMaintenance, archiveRecordUnlocked, upsertUnlocked, persistIndex, DIARY_DAY_RE, DIARY_MONTH_RE }

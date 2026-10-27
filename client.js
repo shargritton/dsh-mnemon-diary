@@ -34,6 +34,7 @@ window.__ModuleLoader__.load({
 
     function Section(props) {
       const call = props.call
+      const callAny = props.callAny
       const [ov, setOv] = useState(null)
       const [cfg, setCfg] = useState(null)
       const [err, setErr] = useState('')
@@ -52,10 +53,18 @@ window.__ModuleLoader__.load({
       const [genElapsed, setGenElapsed] = useState(0)
       const [genStatus, setGenStatus] = useState(null)
       const [adoptBusy, setAdoptBusy] = useState('')
+      const [reviewInfo, setReviewInfo] = useState(null)
+      const [reviewErr, setReviewErr] = useState('')
+      const [reviewBusy, setReviewBusy] = useState(false)
       const [adoptElapsed, setAdoptElapsed] = useState(0)
       const [adoptStatus, setAdoptStatus] = useState(null)
       const [dialog, setDialog] = useState(null)
       const [confirmBox, setConfirmBox] = useState(null)
+      const [planText, setPlanText] = useState(null)
+      const [planInfo, setPlanInfo] = useState(null)
+      const [planBusy, setPlanBusy] = useState('')
+      const [planMsg, setPlanMsg] = useState('')
+      const [planErr, setPlanErr] = useState('')
       const [job, setJob] = useState(null)
       const [jobElapsed, setJobElapsed] = useState(0)
 
@@ -68,6 +77,101 @@ window.__ModuleLoader__.load({
         } catch (e) { setErr(String(e && e.message || e)) }
       }
       useEffect(() => { load() }, [])
+
+      const REVIEW_ID = 'automation_4edc522f-c2fb-44b0-98e0-053a92afa6c9'
+      const REVIEW_NAME = '记忆月度体检（mnemon）'
+      const REVIEW_PROMPT = [
+        '执行每月一次的记忆体检（mnemon 记忆插件），让记忆像人一样会忘：只留还重要的，删前先归档。',
+        '',
+        '【第一步】调用 skill 工具加载技能 `mnemon-memory-review`，严格按它的预算、遗忘顺序和归档规则执行。',
+        '如果加载失败（skill 未安装），不要慌：直接按本提示里的规则执行，并在报告开头注明「skill 缺失，按内置规则执行」。插件启动时会自动安装该 skill，正常情况下它应该在。',
+        '',
+        '【要点重申】',
+        '1. 只通过 mnemon 工具改记忆：`mnemon_runtime_memory`（action=add/replace/remove；target=memory 或 user）。绝对不要直接编辑 ~/.mnemon/runtime/*.md。',
+        '2. 预算：MEMORY.md ≤ 6KB 且 15–40 条；USER.md ≤ 3KB 且 8–20 条。超了才动手，没超就只做去重和过期清理。',
+        '3. 顺序：去重合并 → 降级 → 过期清理（先写归档文档，确认成功后再 remove）→ 时效淘汰。critical 且属于用户明说「记住」的、安全/权限规则、人格身份，一律不动。',
+        '4. 归档：删任何条目前，先把原文整段写入文档 `记忆归档 YYYY-MM`（用 `mnemon_document_create`；同名已存在就用 `mnemon_document_manage` 更新追加）。归档失败就不许删除。',
+        '5. 顺手整理文档库（大部分插件已自动做，这里只做兜底确认）：`日记 <日期>` 超过 30 天应已并进 `日记合辑 YYYY-MM`、合辑超过 12 个月应已归档；`快照 · …` 只应留最近 20 份。发现漏做的用 `mnemon_document_manage` 补归档；`我是谁` 不动。',
+        '6. 必须先读原文再判断，不许凭标题猜。',
+        '',
+        '【输出】结束时给一份简短报告：MEMORY/USER 条数与字节数（前→后）、归档 N 条、合并 N 组、降级 N 条、跳过 N 条（附理由）、当前总量与预算比例。报告直接写在回复末尾，不建额外文件。若本月无事可做，就回「本月无需调整」并给出当前条数与占用。'
+      ].join('\n')
+
+      let reviewId = REVIEW_ID
+      function findReview(snap) {
+        const list = (snap && snap.automations) || []
+        return list.find(a => a.id === reviewId) || list.find(a => a.name === REVIEW_NAME) || null
+      }
+      // 首次使用（或任务被删）时自动建好这条月度体检，用户不用自己动手
+      async function ensureReview() {
+        const snap = await callAny('/dsh-automation', 'snapshot', { sessionId: 'settings' })
+        const found = findReview(snap)
+        if (found) { reviewId = found.id; return { def: found, created: false } }
+        const r = await callAny('/dsh-automation', 'create', {
+          sessionId: 'settings',
+          input: {
+            name: REVIEW_NAME,
+            prompt: REVIEW_PROMPT,
+            schedule: { kind: 'monthly', day: 1, time: '04:00' },
+            timeZone: 'Asia/Shanghai',
+            permission: 'danger-full-access',
+            maxConcurrentRuns: 1
+          }
+        })
+        const id = (r && r.id) || ''
+        if (!id) throw new Error('创建体检任务失败：没有返回 id')
+        reviewId = id
+        const snap2 = await callAny('/dsh-automation', 'snapshot', { sessionId: 'settings' })
+        return { def: findReview(snap2), created: true }
+      }
+      async function loadReview() {
+        if (!callAny) { setReviewErr('当前页面拿不到定时任务服务，请刷新后重试'); return }
+        try {
+          const snap = await callAny('/dsh-automation', 'snapshot', { sessionId: 'settings' })
+          const def = findReview(snap)
+          setReviewInfo(def || null)
+          setReviewErr(def ? '' : '还没建「记忆月度体检（mnemon）」；点「立即体检」会自动帮你建好')
+        } catch (e) { setReviewErr(String(e && e.message || e)) }
+      }
+      useEffect(() => { loadReview() }, [])
+      async function runReview() {
+        setReviewBusy(true)
+        let skillNote = ''
+        try {
+          // 体检要用的 skill 不存在时先自动装好，别让新会话空手跑
+          try {
+            const st = await call('plan.get')
+            if (!st.skill || !st.skill.exists) {
+              const w = await call('plan.writeSkill')
+              skillNote = '已先自动安装体检 skill：' + w.path
+              setPlanInfo(prev => ({ ...(prev || {}), skill: w.skill }))
+            }
+          } catch (e) {
+            skillNote = '体检 skill 检查失败（不影响排队）：' + String(e && e.message || e)
+          }
+          // 任务不存在就现建一条（首次使用的情况），再排一次运行
+          let createdNote = ''
+          try {
+            const e = await ensureReview()
+            if (e.created) createdNote = '已自动创建「记忆月度体检（mnemon）」（每月 1 日 04:00）'
+          } catch (e) {
+            createdNote = '自动创建体检任务失败（不影响只跑这一次）：' + String(e && e.message || e)
+          }
+          const r = await callAny('/dsh-automation', 'run-now', { automationId: reviewId, sessionId: 'settings' })
+          setDialog({
+            title: '记忆体检已排队 ✅',
+            lines: [skillNote, createdNote, 'runId：' + ((r && r.runId) || '（已提交）'), '它会在一个新会话里执行，跑完那份报告就是体检结果。'].filter(Boolean),
+            hint: '如果两三分钟都没有新会话出现，说明自动流程没起来，请用下面的「手动体检」方案。'
+          })
+          setTimeout(() => { loadReview() }, 3000)
+        } catch (e) {
+          setDialog({
+            title: '启动失败 ❌',
+            lines: [String(e && e.message || e)],
+            hint: '自动流程不可用时请手动体检：在任意会话里对我说「加载 skill mnemon-memory-review，做一次记忆体检」。'
+          })
+        } finally { setReviewBusy(false) }
+      }
       useEffect(() => {
         if (!digestBusy) return
         setDigestElapsed(0)
@@ -98,6 +202,45 @@ window.__ModuleLoader__.load({
         const t = setInterval(() => setWhoamiTick(v => v + 1), 500)
         return () => clearInterval(t)
       }, [whoamiProgress])
+
+      async function loadPlan() {
+        setPlanErr('')
+        try {
+          const r = await call('plan.get')
+          setPlanText(r.text)
+          setPlanInfo({ path: r.path, chars: r.chars, skill: r.skill })
+        } catch (e) { setPlanErr('读取方案失败：' + String(e && e.message || e)) }
+      }
+      function resetPlan() {
+        setConfirmBox({
+          title: '恢复默认方案？',
+          text: '会用插件自带的方案模板覆盖当前「记忆存储方案.md」（旧版先备份到 backups/）。\n写进去的自定义内容会丢，确定吗？',
+          onOk: async () => {
+            setPlanBusy('reset'); setPlanMsg(''); setPlanErr('')
+            try {
+              const r = await call('plan.reset')
+              setPlanText(r.text)
+              setPlanInfo({ path: r.path, chars: r.chars, skill: r.skill })
+              setPlanMsg('已恢复默认模板' + (r.backup ? '（旧版备份：' + r.backup + '）' : ''))
+            } catch (e) { setPlanErr('恢复失败：' + String(e && e.message || e)) }
+            finally { setPlanBusy('') }
+          }
+        })
+      }
+      async function installSkill() {
+        setPlanBusy('skill'); setPlanMsg(''); setPlanErr('')
+        try {
+          const r = await call('plan.writeSkill')
+          setPlanInfo(prev => ({ ...(prev || {}), skill: r.skill }))
+          setDialog({
+            title: '已安装记忆体检 skill ✅',
+            lines: ['写入：' + r.path, '字数：' + r.chars, '旧版备份：' + (r.backup || '（原本没有，未覆盖）')],
+            hint: 'skill 目录是即时扫描的，不用重启；下次说「记忆体检」我就能直接用。'
+          })
+        } catch (e) { setPlanErr('安装 skill 失败：' + String(e && e.message || e)) }
+        finally { setPlanBusy('') }
+      }
+      useEffect(() => { if (planText != null && planInfo == null) loadPlan() }, [planText])
 
       async function save(patch) {
         setBusy('save'); setMsg('')
@@ -478,6 +621,7 @@ window.__ModuleLoader__.load({
             h('input', { style: S.input, type: 'number', value: cfg.whoamiMaxChars ?? 500, onChange: e => setCfg({ ...cfg, whoamiMaxChars: Number(e.target.value) }) }))),
           cfgRow('项目内容入库门槛', h('input', { style: S.input, type: 'number', step: 0.05, min: 0, max: 1, value: cfg.importanceThresholdProject, onChange: e => setCfg({ ...cfg, importanceThresholdProject: Number(e.target.value) }) })),
           cfgRow('闲聊内容入库门槛', h('input', { style: S.input, type: 'number', step: 0.05, min: 0, max: 1, value: cfg.importanceThresholdChat, onChange: e => setCfg({ ...cfg, importanceThresholdChat: Number(e.target.value) }) })),
+          cfgRow('文档库容量上限（MB，超了先归档快照）', h('input', { style: { ...S.input, width: 90 }, type: 'number', min: 2, max: 40, value: cfg.capacityLimitMb ?? 8, onChange: e => setCfg({ ...cfg, capacityLimitMb: Number(e.target.value) || 8 }) })),
           cfgRow('日记的重要候选上限（快照没有上限）', h('input', { style: S.input, type: 'number', min: 2, max: 30, value: cfg.diaryCandidateLimit, onChange: e => setCfg({ ...cfg, diaryCandidateLimit: Number(e.target.value) }) })),
           ),
           h('div', { style: { border: '1px solid rgba(255,255,255,0.14)', borderRadius: 8, padding: '10px 12px 2px', margin: '4px 0 8px' } },
@@ -485,6 +629,8 @@ window.__ModuleLoader__.load({
           cfgRow('日记草稿自动上传记忆', h('input', { type: 'checkbox', checked: !!cfg.autoAdopt, onChange: e => setCfg({ ...cfg, autoAdopt: e.target.checked }) })),
           cfgRow('日记自动归纳到日记集合中', h('input', { type: 'checkbox', checked: cfg.diaryBookEnabled !== false, onChange: e => setCfg({ ...cfg, diaryBookEnabled: e.target.checked }) })),
           cfgRow('日记合集目录', h('input', { style: { ...S.input, width: 360 }, type: 'text', placeholder: '默认 ~/.dsh/mnemon-diary/diary-book', value: cfg.diaryBookDir || '', onChange: e => setCfg({ ...cfg, diaryBookDir: e.target.value }) })),
+          cfgRow('日记合并天数（超过就并成月合辑）', h('input', { style: { ...S.input, width: 90 }, type: 'number', min: 7, max: 365, value: cfg.diaryMergeDays ?? 30, onChange: e => setCfg({ ...cfg, diaryMergeDays: Number(e.target.value) || 30 }) })),
+          cfgRow('日记合辑保留月数（更早的归档）', h('input', { style: { ...S.input, width: 90 }, type: 'number', min: 1, max: 60, value: cfg.diaryArchiveMonths ?? 12, onChange: e => setCfg({ ...cfg, diaryArchiveMonths: Number(e.target.value) || 12 }) })),
           ),
           h('div', { style: S.row }, h('button', { style: S.btn, disabled: !!busy, onClick: () => save() }, busy === 'save' ? '保存中…' : '保存配置')),
           msg ? h('div', { style: S.ok }, msg) : null,
@@ -501,6 +647,8 @@ window.__ModuleLoader__.load({
           cfgRow('我是谁记忆合集目录', h('input', { style: { ...S.input, width: 360 }, type: 'text', placeholder: '默认 ~/.dsh/mnemon-diary/who-am-i', value: cfg.whoAmIDir || '', onChange: e => setCfg({ ...cfg, whoAmIDir: e.target.value }) })),
           cfgRow('我是谁自动上传记忆', h('input', { type: 'checkbox', checked: cfg.autoWhoamiUpload === true, onChange: e => setCfg({ ...cfg, autoWhoamiUpload: e.target.checked }) })),
           cfgRow('我是谁自动归纳到合集', h('input', { type: 'checkbox', checked: cfg.autoWhoamiCollection !== false, onChange: e => setCfg({ ...cfg, autoWhoamiCollection: e.target.checked }) })),
+          cfgRow('我是谁保留份数（2–5）', h('input', { style: { ...S.input, width: 90 }, type: 'number', min: 2, max: 5, value: cfg.whoamiKeep ?? 3, onChange: e => setCfg({ ...cfg, whoamiKeep: Math.min(5, Math.max(2, Number(e.target.value) || 3)) }) })),
+          h('div', { style: { ...S.muted, fontSize: 12, marginTop: -4, marginBottom: 6, lineHeight: 1.6 } }, '上传到记忆的「我是谁」只保留最近 N 篇，更早的会被剔掉；本机 items 目录仍留有原始记录。'),
           ),
           h('div', { style: { border: '1px solid rgba(255,255,255,0.14)', borderRadius: 8, padding: '10px 12px 2px', margin: '4px 0 8px' } },
             h('div', { style: { ...S.muted, fontSize: 12, marginBottom: 8 } }, '人格自动写入（下面两项只能二选一）'),
@@ -533,6 +681,7 @@ window.__ModuleLoader__.load({
             ['项目', '闲聊', '全部'].map(m => h('option', { key: m, value: m }, m)))),
           cfgRow('自动快照（阈值触发）', h('input', { type: 'checkbox', checked: cfg.autoSnapshot !== false, onChange: e => setCfg({ ...cfg, autoSnapshot: e.target.checked }) })),
           cfgRow('快照后自动上传记忆', h('input', { type: 'checkbox', checked: cfg.autoRefine === true, onChange: e => setCfg({ ...cfg, autoRefine: e.target.checked }) })),
+          cfgRow('快照保留份数（更早的归档）', h('input', { style: { ...S.input, width: 90 }, type: 'number', min: 5, max: 200, value: cfg.snapshotKeep ?? 20, onChange: e => setCfg({ ...cfg, snapshotKeep: Number(e.target.value) || 20 }) })),
           cfgRow('快照合集目录', h('input', { style: { ...S.input, width: 360 }, type: 'text', placeholder: '默认 ~/.dsh/mnemon-diary/snapshot-books', value: cfg.snapshotBookDir || '', onChange: e => setCfg({ ...cfg, snapshotBookDir: e.target.value }) })),
           ),
           h('div', { style: { border: '1px solid rgba(255,255,255,0.14)', borderRadius: 8, padding: '10px 12px 2px', margin: '4px 0 8px' } },
@@ -615,7 +764,7 @@ window.__ModuleLoader__.load({
         ,h('div', { style: S.card },
           h('details', null, h('summary', { style: { ...S.title, cursor: 'pointer', userSelect: 'none' } }, `记录我是谁（${(ov.whoami || []).length} 份，点此展开）`),
           h('div', { style: S.row }, h('button', { style: S.btn, onClick: async () => { try { const r = await call('whoami.openDir'); setMsg('已打开我是谁记忆合集目录：' + r.dir) } catch (e) { setErr('打开失败：' + String(e && e.message || e)) } } }, '打开我是谁记忆合集目录')),
-          h('div', { style: { ...S.muted, marginTop: 6, marginBottom: 8, lineHeight: 1.7 } }, `每次生成日记时会顺手写一份「我是谁」：只依据当天素材，总结我的身份、说话做事的样子、和 popo 的立场与最近的变化。上传后并入唯一的「我是谁」记忆合集，文档会逐渐更新。`),
+          h('div', { style: { ...S.muted, marginTop: 6, marginBottom: 8, lineHeight: 1.7 } }, `每次生成日记时会顺手写一份「我是谁」：只依据当天素材，总结我的身份、说话做事的样子、和你的立场与最近的变化。上传后并入唯一的「我是谁」记忆合集，文档会逐渐更新。`),
           ov.whoamiCollection ? h('div', { style: { ...S.muted, marginBottom: 6, wordBreak: 'break-all' } }, `合集位置：${ov.whoamiCollection}`) : null,
           h('div', { style: { ...S.muted, marginTop: 2, marginBottom: 8, lineHeight: 1.7 } }, '上传人格：只替换「我是谁（自动归纳）」那一段，人格文件其余内容原样不动。重写人格：把旧人格和「我是谁」一起重新总结，整份人格全部覆盖，不保留旧内容（写前自动备份）。'),
           whoamiProgress ? h('div', { style: { marginBottom: 8 } },
@@ -637,8 +786,60 @@ window.__ModuleLoader__.load({
               open ? h('div', { style: { marginTop: 8, marginLeft: 18, paddingLeft: 12, borderLeft: '2px solid rgba(127,127,127,.25)' } },
                 h('div', { style: S.title }, `${w.date} · 我是谁`),
                 h('div', { style: S.pre }, open.text || '（空）')) : null)
-          })))
+          }))),
 
+        h('div', { style: { ...S.card, flex: '1 1 320px', minWidth: 300, marginBottom: 16 } },
+          h('details', { open: false }, h('summary', { style: { ...S.title, cursor: 'pointer', userSelect: 'none' } }, '记忆体检（点此展开）'),
+          h('div', { style: { border: '1px solid rgba(255,255,255,0.14)', borderRadius: 8, padding: '10px 12px 8px', margin: '4px 0 8px', fontSize: 13, lineHeight: 1.75 } },
+            h('div', null, '每月 1 日 04:00 自动跑一次（deepseek-flash）。作用：像人一样会忘——只留还重要的，删之前先归档。'),
+            h('div', { style: { ...S.muted, fontSize: 12, margin: '8px 0 2px' } }, '会处理这些文件：'),
+            h('div', null, '· MEMORY.md（长期工作记忆）：合并重复、降级、过期清理；预算 ≤ 6 KB、15–40 条'),
+            h('div', null, '· USER.md（关于你的画像）：同上；预算 ≤ 3 KB、8–20 条'),
+            h('div', null, '· 文档库「日记 …」：插件已自动（单日 >30 天并成月合辑、合辑 >12 个月归档），体检只做确认'),
+            h('div', null, '· 文档库「快照 · …」：插件已自动只留最近 20 份，体检只确认数量没爆'),
+            h('div', null, '· 文档库「记忆归档 YYYY-MM」：被删条目的原文写进这里（先归档，归档失败就不删）'),
+            h('div', null, '· 文档库「我是谁」：不动'),
+            h('div', { style: { ...S.muted, fontSize: 12, margin: '8px 0 2px' } }, '不动的：'),
+            h('div', null, '· drafts / digests / snapshot-books / archives / backups 这些磁盘文件，以及日记正文')
+          ),
+          h('div', { style: { border: '1px solid rgba(255,255,255,0.14)', borderRadius: 8, padding: '10px 12px 8px', margin: '4px 0 8px', fontSize: 13, lineHeight: 1.7 } },
+            h('div', null, '定时任务：记忆月度体检（mnemon）'),
+            h('div', null, '下次自动运行：' + fmtTime(reviewInfo && reviewInfo.nextRunAt)),
+            h('div', null, '上次运行：' + (reviewInfo && reviewInfo.lastRunAt ? fmtTime(reviewInfo.lastRunAt) + ' · ' + (reviewInfo.lastRunStatus || '—') : '还没跑过')),
+            reviewErr ? h('div', { style: { ...S.err, fontSize: 12 } }, reviewErr) : null,
+            h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+              h('button', { style: S.btnPrimary, disabled: reviewBusy, onClick: runReview }, reviewBusy ? '提交中…' : '立即体检'),
+              h('button', { style: S.btn, onClick: loadReview }, '刷新状态'))
+          ),
+          h('div', { style: { border: '1px solid rgba(255,255,200,0.22)', borderRadius: 8, padding: '10px 12px 8px', margin: '4px 0 10px', fontSize: 12, lineHeight: 1.75, opacity: .9 } },
+            h('div', { style: { marginBottom: 4 } }, '手动体检（自动流程不可用时用这个）'),
+            h('div', null, '什么时候手动：按钮点了没反应、自动运行失败/中断、宿主刚重启或换过模型插件、想马上整理而不想等每月 1 日。'),
+            h('div', null, '怎么做：在任意会话里对新开的一行说「加载 skill mnemon-memory-review，做一次记忆体检」；也可以去「设置 → 定时任务」里手动运行「记忆月度体检（mnemon）」。'),
+            h('div', null, '手动跑也一样：先归档再删除，报告会给条数/字节数的前后对比。')
+          )))
+
+        ,
+        h('div', { style: { border: '1px solid rgba(255,255,255,0.18)', borderRadius: 10, padding: '8px 12px 10px', marginTop: 10 } },
+          h('details', { open: false, style: { marginTop: 0 }, onToggle: e => { if (e.target.open && planText == null) loadPlan() } },
+            h('summary', { style: { ...S.title, cursor: 'pointer', userSelect: 'none' } }, '记忆存储方案 & 记忆体检 skill（点此展开）'),
+          h('div', { style: { border: '1px solid rgba(255,255,255,0.14)', borderRadius: 8, padding: '10px 12px 8px', margin: '4px 0 8px', fontSize: 13, lineHeight: 1.7 } },
+            h('div', null, '给人和 AI 的方案指南：日记 / 快照 / 我是谁 / runtime 记忆分别怎么存、什么时候合并归档、出问题查哪里。聊天记录丢了也能照着排错。'),
+            h('div', { style: { ...S.muted, fontSize: 12, marginTop: 4 } }, '文件：' + ((planInfo && planInfo.path) || '~/.dsh/mnemon-diary/记忆存储方案.md')),
+            h('div', { style: { ...S.muted, fontSize: 12, marginTop: 2 } }, 'skill：' + ((planInfo && planInfo.skill && planInfo.skill.path) || '~/.dsh/skills/mnemon-memory-review/SKILL.md') + (planInfo && planInfo.skill ? (planInfo.skill.exists ? (planInfo.skill.synced ? ' · 与方案一致 ✅' : ' · 与方案不一致 ⚠️ 可重新安装') : ' · 尚未安装') : '')),
+            h('textarea', {
+              readOnly: true,
+              style: { width: '100%', minHeight: 380, marginTop: 8, boxSizing: 'border-box', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12, lineHeight: 1.6, background: 'rgba(0,0,0,.18)', color: 'inherit', border: '1px solid rgba(255,255,255,0.14)', borderRadius: 8, padding: 10, cursor: 'text' },
+              value: planText == null ? '（展开后加载…）' : planText
+            }),
+            h('div', { style: { ...S.muted, fontSize: 12, marginTop: 4 } }, '字数：' + (planText == null ? '—' : planText.length) + ' · 只读预览：要改方案就在会话里跟我说，我来改（手改容易把标记段写坏）'),
+            h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+              h('button', { style: S.btn, disabled: !!planBusy || planText == null, onClick: resetPlan }, planBusy === 'reset' ? '恢复中…' : '恢复默认模板'),
+              h('button', { style: S.btn, disabled: !!planBusy || planText == null, onClick: installSkill }, planBusy === 'skill' ? '安装中…' : '安装为 skill'),
+              h('button', { style: S.btn, onClick: async () => { try { await call('plan.openDir') } catch (e) { setPlanErr('打开目录失败：' + String(e && e.message || e)) } } }, '打开目录')
+            ),
+            planMsg ? h('div', { style: { ...S.ok, fontSize: 12, marginTop: 6 } }, planMsg) : null,
+            planErr ? h('div', { style: { ...S.err, fontSize: 12, marginTop: 6 } }, planErr) : null
+          )))
         ,confirmBox ? h('div', { style: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 } },
           h('div', { style: { minWidth: 320, maxWidth: 520, background: '#252526', color: '#eee', border: '1px solid rgba(127,127,127,.35)', borderRadius: 12, padding: 18, boxShadow: '0 12px 40px rgba(0,0,0,.45)' } },
             h('div', { style: { fontWeight: 600, fontSize: 16, marginBottom: 10 } }, '请确认'),
@@ -665,12 +866,17 @@ window.__ModuleLoader__.load({
         if (r && r.ok === false) throw new Error(r.error?.message || 'rpc error')
         return r && typeof r === 'object' && 'value' in r ? r.value : r
       }
+      const callAny = async (channel, endpoint, payload) => {
+        const r = await conn.rpc.call(channel, endpoint, payload)
+        if (r && r.ok === false) throw new Error(r.error?.message || 'rpc error')
+        return r && typeof r === 'object' && 'value' in r ? r.value : r
+      }
       ctx.slots.inject('conversation.view', () => ctx.slots.register({
         name: 'conversation.view',
         id: 'mnemon-diary',
         order: 30,
         label: () => '日记',
-        inject: () => ({ call }),
+        inject: () => ({ call, callAny }),
       }, Section))
     }
 

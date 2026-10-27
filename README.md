@@ -41,6 +41,11 @@
 | `whoamiMinChars` / `whoamiMaxChars` | `50` / `500` | 「我是谁」的字数范围 |
 | `ownerName` | `''` | 「我是谁」与人格重写里对这个人的称呼；留空＝通用「对方」 |
 | `whoAmIDir` | 空 | 「我是谁」记忆合集目录；空则用 `$DSH_HOME/mnemon-diary/who-am-i` |
+| `whoamiKeep` | `3` | 上传到记忆的「我是谁」保留最近几篇（2–5）；更早的从合集里剔除 |
+| `snapshotKeep` | `20` | 文档库里最多保留多少份快照；更早的自动归档 |
+| `diaryMergeDays` | `30` | 单日日记超过多少天就合并成 `日记合辑 YYYY-MM` |
+| `diaryArchiveMonths` | `12` | 月合辑保留几个月；更早的自动归档 |
+| `capacityLimitMb` | `8` | 文档库 active 总量上限（MB）；超了优先归档快照，再归档最旧文档，`我是谁` 永不动 |
 | `personaFile` | 空 | 全局人格文件路径；空则用 `$DSH_HOME/AGENT.md` |
 | `autoWhoamiCollection` | true | 我是谁自动归纳到合集 |
 | `autoWhoamiUpload` | false | 我是谁自动上传记忆 |
@@ -60,8 +65,10 @@
 （可以包含性格的变化、自己认为的身份与关系变化、对自己的期望）。50–500 字，明确不写「今天发生了什么」。
 
 - 生成物落在 `whoAmIDir/items/<date>.json`，UI 里「记录我是谁」折叠面板按日期列出，可展开阅读
-- 每次生成/删除都会重建唯一合集 `whoAmIDir/我是谁.md`（`> 共 N 篇` + 按日期倒序的 `## 日期` 小节）
-- 点「上传记忆」把**整份合集**写进 mnemon 文档（标题固定为 `我是谁`，只保留一份、逐次更新 revision+1）
+- 每次生成/删除都会重建合集 `whoAmIDir/我是谁.md`（`> 只保留最近 N 篇` + 按日期倒序的 `## 日期` 小节）
+- 点「上传记忆」把合集写进 mnemon 文档（标题固定为 `我是谁`，逐次更新 revision+1）
+- **只允许一份**：上传时按标题去重，库里多余的副本（含已归档的旧版本）会先备份到 `$DSH_HOME/mnemon-diary/backups/doc-duplicates/` 再移除；唯一那份若被归档，会被自动拉回 active，而不是新建第二份
+- 合集只收**最近 `whoamiKeep` 篇**（默认 3，范围 2–5）：每次生成/上传，更早的「我是谁」自动从合集与文档里剔除；本机 `items/` 仍保留原始 json 以便回溯
 - 「打开我是谁记忆合集目录」直接打开 `whoAmIDir`
 - 点「上传人格」会用 LLM 把该篇「我是谁」精简归纳成 60–200 字，写进全局人格文件（默认 `~/.dsh/AGENT.md`）里夹在
   `<!-- dsh-mnemon-diary:persona:start -->` / `<!-- dsh-mnemon-diary:persona:end -->` 之间的那一段：
@@ -74,15 +81,24 @@
 
 ## 安装
 
+三种任选：
+
 ```bash
-# 1) 依赖写进 profile
+# A) 从 GitHub 直接装（推荐分享给别人时用这个）
 cd ~/.dsh/profiles/desktop
-# package.json 的 dependencies 加 "dsh-mnemon-diary": "file:/Users/po/dsh/vendor/dsh-mnemon-diary"
-# dsh.profile.bundles 加 "dsh-mnemon-diary"
+# package.json 的 dependencies 加：
+#   "dsh-mnemon-diary": "github:shargritton/dsh-mnemon-diary"
+# dsh.profile.bundles 里加 "dsh-mnemon-diary"
 pnpm install
 
-# 2) 重启 DSH（或重载 web 端插件）
+# B) 从本地目录装（自己改代码时用）
+#   "dsh-mnemon-diary": "file:/你的路径/vendor/dsh-mnemon-diary"
+
+# C) 发布到 npm 之后：
+#   "dsh-mnemon-diary": "^0.1.2"
 ```
+
+装完**重启 DSH**。首次启动会自动做两件事：把体检 skill 写到 `~/.dsh/skills/mnemon-memory-review/SKILL.md`（已存在则不动）、生成 `~/.dsh/mnemon-diary/记忆存储方案.md`。想手动补装，去设置页最下方「记忆存储方案 & 记忆体检 skill」点「安装为 skill」。
 
 ## 数据目录
 
@@ -116,3 +132,34 @@ pnpm remove dsh-mnemon-diary
 ## License
 
 MIT
+## 文档库维护（自动，不用管）
+
+每次生成日记 / 上传「我是谁」后，插件会自动跑一次文档库维护（`maintainDocuments`）：
+
+1. **日记合并**：超过 `diaryMergeDays`（默认 30 天）的单日 `日记 <日期>` → 合并成 `日记合辑 YYYY-MM`（每天一个小节、正文全文保留），原单日文档转 archived
+2. **合辑归档**：`日记合辑` 超过 `diaryArchiveMonths`（默认 12 个月）→ archived
+3. **快照窗口**：快照类文档（`快照 ·` / `聊天 ·` / `综合 ·`）只留最近 `snapshotKeep`（默认 20）份，更早的 archived
+4. **容量守卫**：active 总字节 > `capacityLimitMb`（默认 8 MB）→ 优先归档快照，其次普通文档，月合辑最后，目标回落到上限的 90%；`我是谁` 永不归档
+
+补丁要点：
+
+- 归档只是把文档挪到 `documents/archived/` 并标 `status: archived`，**正文一字不丢**；搜索时带 `includeArchived` 仍可翻旧账
+- 合并/归档**不减少总字节**，只减少文档份数与 active 占用（搜索是逐份读全文的，份数才是速度瓶颈）
+- `我是谁` 单独走单份逻辑，不受上面四条影响
+- 导出脚本 `mnemon-diary/scripts/sync.mjs` 现在 active + archived 都导出，归档不会让 GitHub 掉历史
+
+## 记忆存储方案（插件内指南 + skill 安装）
+
+设置页最下方有一个折叠层「记忆存储方案 & 记忆体检 skill」：
+
+- 正文是 `~/.dsh/mnemon-diary/记忆存储方案.md`，覆盖日记 / 快照 / 我是谁 / runtime 四套存储方案、参数表、维护时序、当前实况和排错表——给人和 AI 共用的排错指南
+- 框里是**只读预览**：手动编辑容易把 `<!-- skill:start -->` 标记段写坏，所以保存按钮已去掉；要改方案就在会话里让 AI 改（它改完会同步备份到 `backups/plan-*.md`）。「恢复默认模板」用插件自带的 `plan-template.md` 重新生成
+- 文件里 `<!-- skill:start -->` 与 `<!-- skill:end -->` 之间就是记忆体检 skill 的全文；点「安装为 skill」写到 `~/.dsh/skills/mnemon-memory-review/SKILL.md`（已存在则先备份到 `backups/skills/`），skill 目录即时生效，不用重启。另有兜底：插件首次启动会自动安装（仅当文件不存在），点「立即体检」时也会先检查并补装
+
+## 记忆体检
+
+设置页有「记忆体检」卡片，说明这次体检会动哪些文件，并提供「立即体检」按钮——它调用定时任务 `automation_4edc522f-c2fb-44b0-98e0-053a92afa6c9`（记忆月度体检，每月 1 日 04:00）立即跑一次。
+
+- 处理：`runtime/MEMORY.md`、`runtime/USER.md`（合并/降级/过期清理，预算 6 KB / 3 KB）、文档库 `日记 <日期>`（>12 个月归档）、`快照 · …`（>6 个月归档或合并）、`记忆归档 YYYY-MM`（删前归档）
+- 不动：`我是谁` 文档、drafts/digests/snapshot-books/archives/backups 等磁盘文件
+- 手动兜底：自动流程失败或按钮无响应时，在会话里说「加载 skill mnemon-memory-review，做一次记忆体检」；也可在「设置 → 定时任务」手动运行
