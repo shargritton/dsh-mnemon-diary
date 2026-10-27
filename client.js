@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
     var module = { exports: {} }
     var exports = module.exports
     const React = require('react')
-    const { useState, useEffect } = React
+    const { useState, useEffect, useRef } = React
     const h = React.createElement
 
     const S = {
@@ -65,6 +65,8 @@ window.__ModuleLoader__.load({
       const [planBusy, setPlanBusy] = useState('')
       const [planMsg, setPlanMsg] = useState('')
       const [planErr, setPlanErr] = useState('')
+      const [memWarn, setMemWarn] = useState(null)
+      const memWarnedRef = useRef(false)
       const [job, setJob] = useState(null)
       const [jobElapsed, setJobElapsed] = useState(0)
 
@@ -74,6 +76,23 @@ window.__ModuleLoader__.load({
           setOv(d)
           setCfg(d.config)
           setErr('')
+          const mem = d.memory || null
+          setMemWarn(mem && !mem.found ? mem : null)
+          if (mem && !mem.found && !memWarnedRef.current) {
+            memWarnedRef.current = true
+            setDialog({
+              title: '还差一个记忆插件：dsh-mnemon',
+              lines: [
+                '这个插件自己不存记忆——日记、「我是谁」最后都要写进 dsh-mnemon 的文档库。',
+                '当前没检测到 dsh-mnemon，所以现在能生成草稿，但「上传记忆」会写进一个没人读的空库。',
+                '安装：DSH 设置 → 插件市场，搜 dsh-mnemon 装上（推荐）；或手动在 profile 的 dependencies 加 "dsh-mnemon": "^0.5.36" 再 pnpm install。',
+                '装完重启 DSH，回来点「重新检测」。',
+                'npm：' + (mem.npmUrl || 'https://www.npmjs.com/package/dsh-mnemon'),
+                '源码：' + (mem.repoUrl || 'https://github.com/omdsh-dev/dsh-mnemon')
+              ],
+              hint: '没装记忆插件也能用日记这本书，但记忆入库是空的。'
+            })
+          }
         } catch (e) { setErr(String(e && e.message || e)) }
       }
       useEffect(() => { load() }, [])
@@ -288,7 +307,20 @@ window.__ModuleLoader__.load({
         try { const d = await call('draft.get', { date }); setOpenDrafts([...openDrafts, d]) }
         catch (e) { setErr(String(e && e.message || e)) }
       }
+      function warnNoMemory() {
+        setDialog({
+          title: '先装记忆插件 dsh-mnemon',
+          lines: [
+            '日记和「我是谁」要写进 dsh-mnemon 的文档库，现在没检测到它。',
+            '装：DSH 设置 → 插件市场搜 dsh-mnemon；或 profile dependencies 加 "dsh-mnemon": "^0.5.36" 再 pnpm install。',
+            '装完重启 DSH，回来点「重新检测」再上传。',
+            'npm：' + ((memWarn && memWarn.npmUrl) || 'https://www.npmjs.com/package/dsh-mnemon'),
+            '源码：' + ((memWarn && memWarn.repoUrl) || 'https://github.com/omdsh-dev/dsh-mnemon')
+          ]
+        })
+      }
       async function adopt(date) {
+        if (memWarn) { warnNoMemory(); return }
         if (adoptBusy) return
         setAdoptBusy(date)
         setAdoptStatus({ kind: 'busy', text: '正在上传记忆…' })
@@ -335,6 +367,7 @@ window.__ModuleLoader__.load({
         catch (e) { setErr(String(e && e.message || e)) }
       }
       async function uploadWhoami(date) {
+        if (memWarn) { warnNoMemory(); return }
         if (whoamiBusy) return
         setWhoamiBusy(date)
         setWhoamiProgress({ date, kind: 'upload', started: Date.now() })
@@ -600,6 +633,14 @@ window.__ModuleLoader__.load({
         h('div', { style: { display: 'flex', gap: 16, alignItems: 'stretch', flexWrap: 'wrap' } },
         h('div', { style: { ...S.card, flex: '1 1 420px', minWidth: 340, marginBottom: 16 } },
           h('details', { open: true }, h('summary', { style: { ...S.title, cursor: 'pointer', userSelect: 'none' } }, '每日日记（点此展开）'),
+          memWarn ? h('div', { style: { border: '1px solid rgba(240,160,80,0.5)', background: 'rgba(240,160,80,0.08)', borderRadius: 8, padding: '10px 12px', margin: '4px 0 8px', fontSize: 13, lineHeight: 1.7 } },
+            h('div', { style: { fontWeight: 600, marginBottom: 4 } }, '⚠️ 还没装记忆插件 dsh-mnemon'),
+            h('div', null, '这个插件不自己存记忆：日记和「我是谁」要写进 dsh-mnemon 的文档库。没装的话，「上传记忆」写进去也没人读。'),
+            h('div', { style: S.row },
+              h('span', { style: { ...S.muted, fontSize: 12 } }, '装法：插件市场搜 dsh-mnemon；或 profile dependencies 加 "dsh-mnemon": "^0.5.36" 再 pnpm install，然后重启'),
+              h('button', { style: S.btn, onClick: async () => { try { const r = await call('env.check'); const m = r && r.memory; setMemWarn(m && !m.found ? m : null); setMsg(m && m.found ? '已检测到 dsh-mnemon ✅' : '还是没检测到，装完记得重启 DSH') } catch (e) { setErr(String(e && e.message || e)) } } }, '重新检测')),
+            h('div', { style: { ...S.muted, fontSize: 12, marginTop: 6, wordBreak: 'break-all' } }, 'npm：' + (memWarn.npmUrl || 'https://www.npmjs.com/package/dsh-mnemon') + '　源码：' + (memWarn.repoUrl || 'https://github.com/omdsh-dev/dsh-mnemon')))
+          : null,
           h('div', { style: { border: '1px solid rgba(255,255,255,0.14)', borderRadius: 8, padding: '10px 12px', margin: '4px 0 8px' } },
             h('div', { style: { ...S.muted, fontSize: 12, marginBottom: 8 } }, '立即生成（点一次，两项一起生成）'),
             h('div', { style: S.row },

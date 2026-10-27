@@ -1880,6 +1880,44 @@ function adopt(date, dryRun = false) {
   return { ok: true, records: records.length, planned, written, skippedExisting, total: write.total, backup: write.backup, safeToDiscard, note: d.note }
 }
 
+// 这个插件自己不存记忆：日记要写进 dsh-mnemon 的文档库。
+// 装完先探一下对面在不在，不在就把「要装什么、去哪装」直接告诉用户。
+const MNEMON_NPM = 'https://www.npmjs.com/package/dsh-mnemon'
+const MNEMON_REPO = 'https://github.com/omdsh-dev/dsh-mnemon'
+function memoryPluginStatus() {
+  const home = HOME()
+  const profile = path.join(home, 'profiles', 'desktop')
+  const pkgFile = path.join(profile, 'package.json')
+  const modPkg = path.join(profile, 'node_modules', 'dsh-mnemon', 'package.json')
+  const out = { found: false, installed: false, declared: false, enabled: false, version: '', npmUrl: MNEMON_NPM, repoUrl: MNEMON_REPO, documentsDir: '', checked: { pkgFile, modPkg } }
+  try {
+    const pkg = readJson(pkgFile, {})
+    const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) }
+    out.declared = Object.prototype.hasOwnProperty.call(deps, 'dsh-mnemon')
+  } catch {}
+  try {
+    const mp = readJson(modPkg, {})
+    if (mp && mp.name === 'dsh-mnemon') { out.installed = true; out.version = String(mp.version || '') }
+  } catch {}
+  try {
+    const yml = fs.readFileSync(path.join(profile, 'cordis.yml'), 'utf8')
+    out.enabled = /(^|\s)(name|id):\s*['"]?dsh-mnemon['"]?\s*$/m.test(yml)
+  } catch {}
+  const docsRoot = path.join(home, '..', '.mnemon', 'documents')
+  const candidate = process.env.MNEMON_DOCUMENTS_DIR || path.join(os.homedir(), '.mnemon', 'documents')
+  out.documentsDir = candidate
+  const hasDocs = fs.existsSync(path.join(candidate, 'index.json')) || fs.existsSync(candidate)
+  out.found = (out.installed && out.enabled) || (out.installed && hasDocs)
+  out.tips = out.found
+    ? []
+    : [
+        '在 DSH 的插件市场里搜 dsh-mnemon 安装（推荐）',
+        '或手动：profile 的 dependencies 加 "dsh-mnemon": "^0.5.36"，再 pnpm install',
+        '装完重启 DSH，然后回这里刷新'
+      ]
+  return out
+}
+
 function overview() {
   const cfg = loadConfig()
   const state = loadState()
@@ -1891,13 +1929,16 @@ function overview() {
     cfg.includedSessions = ids
     saveConfig({ includedSessions: ids })
   }
-  return { config: cfg, state, sessions, drafts: listDrafts(), digests: digestList(), whoami: listWhoami(), whoamiDirResolved: resolveWhoamiDir(cfg), whoamiCollection: whoamiCollectionFile(), archives: archiveList(), archiveDirResolved: resolveArchivePath(cfg), diaryBookResolved: resolveDiaryBookDir(cfg), snapshotBookDirResolved: resolveSnapshotBookDir() }
+  let memory = null
+  try { memory = memoryPluginStatus() } catch {}
+  return { memory, config: cfg, state, sessions, drafts: listDrafts(), digests: digestList(), whoami: listWhoami(), whoamiDirResolved: resolveWhoamiDir(cfg), whoamiCollection: whoamiCollectionFile(), archives: archiveList(), archiveDirResolved: resolveArchivePath(cfg), diaryBookResolved: resolveDiaryBookDir(cfg), snapshotBookDirResolved: resolveSnapshotBookDir() }
 }
 
 async function handle(ctx, endpoint, payload) {
   const cfg = loadConfig()
   switch (endpoint) {
     case 'overview': return overview()
+    case 'env.check': return { memory: memoryPluginStatus() }
     case 'config.get': return cfg
     case 'config.set': return { config: saveConfig(payload?.patch || {}) }
     case 'sessions.list': return { sessions: overview().sessions }
@@ -1982,6 +2023,10 @@ export function apply(ctx) {
   } catch (e) {
     dbg(`自动安装体检 skill 失败（不影响插件）：${e && e.message}`)
   }
+  try {
+    const mem = memoryPluginStatus()
+    dbg(`记忆插件检查：found=${mem.found} installed=${mem.installed} enabled=${mem.enabled} version=${mem.version || '?'}`)
+  } catch (e) { dbg('记忆插件检查失败：' + (e && e.message)) }
   dbg('apply start')
   const state = loadState()
   if (!state.nextAt) {
@@ -2068,4 +2113,4 @@ export function apply(ctx) {
   }, `${PLUGIN}: scheduler`)
 }
 
-export const __test = { scanSessions, readSession, walkSessionFiles, nextSlotFrom, normalizeDailyAt, scheduleSignature, writeMnemon, writeDocument, documentsRoot, docPaths, renderDocument, diagWriteTest, adopt, listDrafts, loadConfig, writeWhoami, listWhoami, uploadWhoami, deleteWhoami, uploadPersona, rewritePersona, extractPersonaSection, dropPersonaSection, looksTruncatedPersona, cleanPersonaBody, splitPersonaDoc, stripPersonaBlock, summarizePersona, writePersonaBlock, resolvePersonaFile, rebuildWhoamiCollection, resolveWhoamiDir, whoamiCollectionFile, getWhoami, whoamiKeepCount, keepSingleDocument, documentBodyOf, planGet, planSave, planReset, planWriteSkill, planFile, planTemplate, skillFile, skillStatus, extractSkillSection, maintainDocuments, runMaintenance, archiveRecordUnlocked, upsertUnlocked, persistIndex, DIARY_DAY_RE, DIARY_MONTH_RE }
+export const __test = { scanSessions, readSession, walkSessionFiles, nextSlotFrom, normalizeDailyAt, scheduleSignature, writeMnemon, writeDocument, documentsRoot, docPaths, renderDocument, diagWriteTest, adopt, listDrafts, loadConfig, writeWhoami, listWhoami, uploadWhoami, deleteWhoami, uploadPersona, rewritePersona, extractPersonaSection, dropPersonaSection, looksTruncatedPersona, cleanPersonaBody, splitPersonaDoc, stripPersonaBlock, summarizePersona, writePersonaBlock, resolvePersonaFile, rebuildWhoamiCollection, resolveWhoamiDir, whoamiCollectionFile, getWhoami, whoamiKeepCount, keepSingleDocument, documentBodyOf, planGet, planSave, planReset, planWriteSkill, planFile, planTemplate, skillFile, skillStatus, extractSkillSection, maintainDocuments, runMaintenance, archiveRecordUnlocked, upsertUnlocked, persistIndex, DIARY_DAY_RE, DIARY_MONTH_RE, memoryPluginStatus }

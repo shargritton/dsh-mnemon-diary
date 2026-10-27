@@ -1,6 +1,6 @@
 {
   "name": "dsh-mnemon-diary",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "为 dsh-mnemon 增加每日日记、重要记忆筛选与草稿审阅的伴生插件",
   "type": "module",
   "main": "index.js",
