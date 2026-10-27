@@ -106,7 +106,7 @@ pnpm install
 #   "dsh-mnemon-diary": "file:/你的路径/vendor/dsh-mnemon-diary"
 
 # C) 发布到 npm 之后：
-#   "dsh-mnemon-diary": "^0.1.2"
+#   "dsh-mnemon-diary": "^0.1.4"
 ```
 
 装完**重启 DSH**。首次启动会自动做两件事：把体检 skill 写到 `~/.dsh/skills/mnemon-memory-review/SKILL.md`（已存在则不动）、生成 `~/.dsh/mnemon-diary/记忆存储方案.md`。想手动补装，去设置页最下方「记忆存储方案 & 记忆体检 skill」点「安装为 skill」。
