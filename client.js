@@ -759,7 +759,7 @@ window.__ModuleLoader__.load({
                 h('button', { style: S.btn, disabled: !!digestBusy || !!busy, onClick: () => makeDigest(s.id, (cfg.sessionModes && cfg.sessionModes[s.id]) || cfg.autoDigestMode || '项目') }, digestBusy === s.id ? '生成中…' : '快照'), h('button', { style: S.btn, disabled: !!busy, onClick: () => archiveNow(s.id) }, busy === 'archive' ? '归档中…' : '归档')))))))),
 
         h('div', { style: S.card },
-          h('details', null, h('summary', { style: { ...S.title, cursor: 'pointer', userSelect: 'none' } }, `日记草稿（${ov.drafts.length} 份，点此展开）`),
+          h('details', null, h('summary', { style: { ...S.title, cursor: 'pointer', userSelect: 'none' } }, `日记（${ov.drafts.length} 份，点此展开）`),
           h('div', { style: { ...S.muted, marginTop: 6, marginBottom: 8, lineHeight: 1.7 } }, `日记会生成每日的信息，采纳后自动储存到记忆库；同一天可以多次生成，日记重要条目还要通过入库阈值，达到阈值才会储存到记忆中。`),
           h('div', { style: { ...S.row, marginTop: 6 } }, h('button', { style: S.btn, onClick: () => openDiaryBookDir() }, '打开日记合集目录'), h('span', { style: { ...S.muted, marginLeft: 8 } }, ov.diaryBookResolved || '')),
           ov.drafts.length === 0 ? h('div', { style: S.muted }, '还没有草稿，点「立即生成」。') : null,
@@ -776,7 +776,7 @@ window.__ModuleLoader__.load({
           }))),
 
         h('div', { style: S.card },
-          h('details', null, h('summary', { style: { ...S.title, cursor: 'pointer', userSelect: 'none' } }, `记录我是谁（${(ov.whoami || []).length} 份，点此展开）`),
+          h('details', null, h('summary', { style: { ...S.title, cursor: 'pointer', userSelect: 'none' } }, `我是谁（${(ov.whoami || []).length} 份，点此展开）`),
           h('div', { style: S.row }, h('button', { style: S.btn, onClick: async () => { try { const r = await call('whoami.openDir'); setMsg('已打开我是谁记忆合集目录：' + r.dir) } catch (e) { setErr('打开失败：' + String(e && e.message || e)) } } }, '打开我是谁记忆合集目录')),
           h('div', { style: { ...S.muted, marginTop: 6, marginBottom: 8, lineHeight: 1.7 } }, `每次生成日记时会顺手写一份「我是谁」：只依据当天素材，总结我的身份、说话做事的样子、和你的立场与最近的变化。上传后并入唯一的「我是谁」记忆合集，文档会逐渐更新。`),
           ov.whoamiCollection ? h('div', { style: { ...S.muted, marginBottom: 6, wordBreak: 'break-all' } }, `合集位置：${ov.whoamiCollection}`) : null,
@@ -803,7 +803,7 @@ window.__ModuleLoader__.load({
           }))),
 
         h('div', { style: S.card },
-          h('details', null, h('summary', { style: { ...S.title, cursor: 'pointer', userSelect: 'none' } }, `已生成的快照（${(ov.digests || []).length} 份，点此展开）`),
+          h('details', null, h('summary', { style: { ...S.title, cursor: 'pointer', userSelect: 'none' } }, `快照（${(ov.digests || []).length} 份，点此展开）`),
           h('div', { style: S.row }, h('button', { style: S.btn, onClick: async () => { try { const r = await call('books.openDir'); setMsg('已打开快照合集目录：' + r.path) } catch (e) { setErr('打开失败：' + String(e && e.message || e)) } } }, '打开快照合集目录')),
           h('div', { style: { ...S.muted, marginTop: 6, marginBottom: 8, lineHeight: 1.7 } }, `快照会从整段会话中精炼出重要内容，是整个会话的精炼版本。支持【项目】【闲聊】【全部】三种精炼方式，方便提取真正想要的内容；精炼出的条目还要通过入库阈值，达到阈值才会储存到记忆中。`),
           ov.state.lastArchive ? h('div', { style: { ...S.muted, marginTop: 6 } }, `最近归档：${ov.state.lastArchive.path}（${ov.state.lastArchive.messages} 条）`) : null,
@@ -822,7 +822,7 @@ window.__ModuleLoader__.load({
           }),)),
 
         h('div', { style: S.card },
-          h('details', null, h('summary', { style: { ...S.title, cursor: 'pointer', userSelect: 'none' } }, `已生成归档（${(ov.archives || []).length} 份，点此展开）`),
+          h('details', null, h('summary', { style: { ...S.title, cursor: 'pointer', userSelect: 'none' } }, `归档（${(ov.archives || []).length} 份，点此展开）`),
           h('div', { style: { ...S.muted, marginTop: 6, marginBottom: 8, lineHeight: 1.7 } }, `归档用于储存完整的会话记录，方便随时恢复记忆。由于数据量太大，它不会自动写入记忆库，只作为恢复记忆的最后保障。`),
           h('div', { style: { ...S.row, marginTop: 6 } },
             h('button', { style: S.btn, onClick: () => openArchiveDir() }, '打开归档目录'),
