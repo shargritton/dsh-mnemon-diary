@@ -1,7 +1,7 @@
 # 记忆存储方案（v1 · 2026-10-28）
 
 > 这份文件由 dsh-mnemon-diary 插件维护，设置页最下方「记忆存储方案 & 记忆体检 skill」折叠层可以直接改、可以恢复默认。
-> 写给两个人：给 popo 看懂"东西都存在哪、什么时候会消失"，也给我（AI）在聊天记录丢失后照着排错。
+> 写给两个人：给你（使用者）看懂"东西都存在哪、什么时候会消失"，也给我（AI）在聊天记录丢失后照着排错。
 
 ## 0. 一句话总览
 
@@ -92,14 +92,15 @@
 守卫的取舍顺序：**快照 → 普通文档 → 月合辑**；`我是谁` 永不动；目标是回落到上限的 90%。
 手动触发：`POST http://127.0.0.1:<GUI 端口>/mnemon-diary/docs.maintain`；看状态用 `docs.stats`。
 
-## 8. 当前实况（2026-10-28 01:20）
+## 8. 当前实况（怎么查，别抄数字）
 
-- 文档库：**7 份 / 32,083 B = 0.31%**（日记 2 份、快照 4 份都在 10-27、我是谁 1 份）
-- 快照 4 份来自 10-27 的不同会话（`快照 · 2026-10-27 · c04fcba0` 等），体积占了 74.8%
-- `backups/` 清掉 102 MB 旧 prime 遗留 `memory-*.db` 后剩 4.6 MB
-- runtime：MEMORY.md 约 1 KB、USER.md 约 0.14 KB
-- 已开：`autoAdopt`、`autoWhoamiUpload`、`autoWhoamiCollection`、`autoWhoamiRewritePersona`、`rewriteKeepBoundary`
-- 插件版本 0.1.1
+这节不写死数字——每台机器、每一天都不一样。要看自己的实况，用下面两种方式之一：
+
+- 设置页「记忆存储方案 & 记忆体检 skill」上方各卡片的状态行；
+- 或 `POST http://127.0.0.1:<GUI 端口>/mnemon-diary/docs.stats`，返回 `{docs, active, archived, activeBytes, keep}`；
+  `activeBytes / 10485760` 就是占用比例。
+
+重点看四样：**文档份数、active 总字节、runtime 的 MEMORY/USER 字节数、已开的开关**（`autoAdopt`、`autoWhoamiUpload`、`autoWhoamiCollection`、`autoWhoamiPersona`、`autoWhoamiRewritePersona`、`rewriteKeepBoundary`）。
 
 ## 9. 排错指南（聊天记录丢了就靠这节）
 
